@@ -18,8 +18,15 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
+    "TRADINGAGENTS_CHINA_DATA_VENDOR":    "china_data_vendor_default",
 }
 
+# A-share data vendor — when a stock code is detected as A-share (e.g.
+# 000001, 600036.SH, 688987.BJ), the China data vendors
+# (akshare/tushare) are used automatically.
+# The priority order is configurable; default uses akshare first, then tushare.
+# yfinance is kept as a fallback for A-share symbols that are not recognized.
+# Set via TRADINGAGENTS_CHINA_DATA_VENDOR env var or directly in config dict.
 
 def _coerce(value: str, reference):
     """Coerce env-var string to the type of the existing default value."""
@@ -96,6 +103,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "ECB Bank of England BOJ central bank policy",
         "oil commodities supply chain energy",
     ],
+    # A-share (China) data vendor auto-routing.
+    # When a stock symbol is detected as A-share (000001, 600036.SH, 688987.BJ),
+    # the system automatically routes to these domestic data vendors instead of yfinance.
+    # Priority order is configurable: first vendor is tried first, second is fallback.
+    # Set via TRADINGAGENTS_CHINA_DATA_VENDOR env var to override this default.
+    "china_data_vendor_default": "tushare,akshare,baostock",
     # Data vendor configuration
     # Category-level configuration (default for all tools in category).
     # The configured value is the exact vendor chain — requests are NOT silently

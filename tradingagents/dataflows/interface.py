@@ -11,6 +11,19 @@ from .alpha_vantage import (
     get_news as get_alpha_vantage_news,
     get_stock as get_alpha_vantage_stock,
 )
+from .akshare_provider import (
+    get_indicators_akshare,
+    get_stock_data_akshare,
+    is_cn_symbol as _is_cn_symbol_from_akshare,
+)
+from .tushare_provider import (
+    get_indicators_tushare,
+    get_stock_data_tushare,
+)
+from .baostock_provider import (
+    get_indicators_baostock,
+    get_stock_data_baostock,
+)
 from .config import get_config
 from .errors import (
     NoMarketDataError,
@@ -82,6 +95,9 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "akshare",
+    "tushare",
+    "baostock",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -90,11 +106,17 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "akshare": get_stock_data_akshare,
+        "tushare": get_stock_data_tushare,
+        "baostock": get_stock_data_baostock,
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "akshare": get_indicators_akshare,
+        "tushare": get_indicators_tushare,
+        "baostock": get_indicators_baostock,
     },
     # fundamental_data
     "get_fundamentals": {
@@ -143,10 +165,40 @@ def get_category_for_method(method: str) -> str:
             return category
     raise ValueError(f"Method '{method}' not found in any category")
 
-def get_vendor(category: str, method: str = None) -> str:
+def is_cn_symbol(symbol: str) -> bool:
+    """Detect whether a ticker symbol represents a Chinese A-share stock."""
+    s = str(symbol).upper().strip()
+    # A-share patterns: 6-digit pure numbers, or with .SH/.SZ/.BJ suffixes
+    if s.endswith(".SH") or s.endswith(".SZ") or s.endswith(".BJ"):
+        return True
+    if s.startswith("SH") or s.startswith("SZ") or s.startswith("BJ") and len(s) > 6:
+        return True
+    if len(s) == 6 and s.isdigit() and (s.startswith("6") or s.startswith("0") or s.startswith("3") or s.startswith("8") or s.startswith("4")):
+        return True
+    return False
+
+
+def get_vendor(category: str, method: str = None, symbol: str = None) -> str:
     """Get the configured vendor for a data category or specific tool method.
     Tool-level configuration takes precedence over category-level.
+    For Chinese A-share symbols, automatically route to the configured China
+    data source chain (e.g. "akshare,tushare") so that vendor-level fallback
+    works when the primary China vendor is rate-limited or unavailable.
     """
+    # Auto-route Chinese A-share symbols to domestic data sources.
+    # Return the full vendor chain so route_to_vendor can try each in order.
+    if symbol and is_cn_symbol(symbol):
+        china_chain = get_config().get("china_data_vendor_default", "akshare,tushare")
+        # Filter to only vendors that are actually registered for this method
+        if method and method in VENDOR_METHODS:
+            available = [v.strip() for v in china_chain.split(",")
+                        if v.strip() in VENDOR_METHODS[method]]
+            if available:
+                return ",".join(available)
+        # Fallback: try akshare at minimum
+        if method and method in VENDOR_METHODS and "akshare" in VENDOR_METHODS[method]:
+            return "akshare"
+
     config = get_config()
 
     # Check tool-level configuration first (if method provided)
@@ -161,7 +213,9 @@ def get_vendor(category: str, method: str = None) -> str:
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
-    vendor_config = get_vendor(category, method)
+    # Extract symbol from args for market detection (first arg is always the ticker symbol)
+    symbol = args[0] if args else None
+    vendor_config = get_vendor(category, method, symbol=symbol)
     primary_vendors = [v.strip() for v in vendor_config.split(',')]
 
     if method not in VENDOR_METHODS:
@@ -186,20 +240,26 @@ def route_to_vendor(method: str, *args, **kwargs):
         vendor_chain = all_available_vendors
 
     last_no_data: NoMarketDataError | None = None
+    last_not_configured: VendorNotConfiguredError | None = None
     first_error: Exception | None = None
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         try:
+            logger.info(
+                "Routing %s(%s) → vendor %r (chain: %s)",
+                method, symbol or "", vendor, vendor_chain,
+            )
             return impl_func(*args, **kwargs)
         except VendorRateLimitError:
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
             continue
         except VendorNotConfiguredError as e:
-            logger.warning("Vendor %r not configured for %s; trying next vendor.", vendor, method)
+            logger.warning("Vendor %r not configured for %s: %s; trying next vendor.", vendor, method, e)
+            last_not_configured = e
             if first_error is None:
-                first_error = e  # Surface it if no other vendor can serve the call.
+                first_error = e
             continue
         except NoMarketDataError as e:
             last_no_data = e  # No data here; another configured vendor may have it
@@ -239,8 +299,19 @@ def route_to_vendor(method: str, *args, **kwargs):
             f"fabricate values — report that data is unavailable for this symbol."
         )
 
-    # No vendor returned data and none reported clean "no data" — surface the
-    # first real error (e.g. the primary vendor's network failure).
+    # If all vendors were "not configured" (e.g. FRED_API_KEY missing and
+    # no other macro vendor), return a friendly sentinel instead of crashing
+    # the entire agent pipeline. The LLM will report data as unavailable.
+    if last_not_configured is not None:
+        vendor_name = vendor_chain[0] if vendor_chain else "unknown"
+        return (
+            f"NO_DATA_AVAILABLE: Data source '{vendor_name}' is not configured for "
+            f"'{method}'. {last_not_configured}. Do not estimate or fabricate values "
+            f"— report that data is unavailable for this method."
+        )
+
+    # No vendor returned data and none reported clean "no data" or "not configured" —
+    # surface the first real error (e.g. the primary vendor's network failure).
     if first_error is not None:
         raise first_error
 

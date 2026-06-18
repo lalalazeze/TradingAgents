@@ -89,6 +89,27 @@ _DEFAULT = ModelCapabilities(
     preferred_structured_method="function_calling",
 )
 
+# Qwen's thinking/reasoning models (Qwen3, QwQ, Qwen3.7-Max with thinking
+# enabled) accept the ``tools`` array but reject ``tool_choice`` being set
+# to ``required`` or ``object`` — same pattern as DeepSeek V4. The error
+# message is: "The tool_choice parameter does not support being set to
+# required or object in thinking mode". Setting supports_tool_choice=False
+# suppresses the kwarg while still shipping the schema as a tool definition,
+# which is the correct usage per DashScope's official integration examples.
+_QWEN_THINKING = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=True,
+    supports_json_schema=False,
+    preferred_structured_method="function_calling",
+)
+
+_QWEN_CHAT = ModelCapabilities(
+    supports_tool_choice=True,
+    supports_json_mode=True,
+    supports_json_schema=False,
+    preferred_structured_method="function_calling",
+)
+
 
 # Exact-ID matches take precedence over pattern matches.
 _BY_ID: dict[str, ModelCapabilities] = {
@@ -105,6 +126,17 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "MiniMax-M2.1": _MINIMAX_THINKING,
     "MiniMax-M2.1-highspeed": _MINIMAX_THINKING,
     "MiniMax-M2": _MINIMAX_THINKING,
+    # Qwen — thinking mode models reject tool_choice=required/object
+    "qwq-plus-latest": _QWEN_THINKING,
+    "qwq-plus": _QWEN_THINKING,
+    "qwq-32b": _QWEN_THINKING,
+    "qwen3-235b-a22b": _QWEN_THINKING,
+    "qwen3-30b-a3b": _QWEN_THINKING,
+    "qwen-max-latest": _QWEN_THINKING,
+    "qwen-plus-latest": _QWEN_CHAT,
+    "qwen-plus": _QWEN_CHAT,
+    "qwen-turbo-latest": _QWEN_CHAT,
+    "qwen-turbo": _QWEN_CHAT,
 }
 
 # Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
@@ -113,6 +145,14 @@ _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
+    # Qwen3.x thinking models — when thinking mode is enabled (which is
+    # the default for these IDs via DashScope), tool_choice must not be
+    # set to required/object.
+    (re.compile(r"^qwen3"), _QWEN_THINKING),
+    (re.compile(r"^qwq"), _QWEN_THINKING),
+    (re.compile(r"^qwen-max"), _QWEN_THINKING),
+    (re.compile(r"^qwen-plus"), _QWEN_CHAT),
+    (re.compile(r"^qwen-turbo"), _QWEN_CHAT),
 ]
 
 

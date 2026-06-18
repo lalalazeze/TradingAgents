@@ -39,6 +39,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.dataflows.interface import is_cn_symbol
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 
@@ -63,12 +64,21 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
+        # Pre-fetch data sources. Each fetcher degrades gracefully and
         # returns a string (no exceptions surface from here), so the LLM
         # always sees something — either real data or a clear placeholder.
+        #
+        # For Chinese A-share symbols, StockTwits and Reddit are skipped
+        # because these US-centric social platforms do not cover A-share
+        # tickers — their "data" would be empty placeholders or SSL errors.
+        is_cn = is_cn_symbol(ticker)
         news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
-        reddit_block = fetch_reddit_posts(ticker)
+        if is_cn:
+            stocktwits_block = "<unavailable> StockTwits does not cover Chinese A-share stocks."
+            reddit_block = "<unavailable> Reddit (r/wallstreetbets, r/stocks, r/investing) does not cover Chinese A-share stocks."
+        else:
+            stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
+            reddit_block = fetch_reddit_posts(ticker)
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -77,6 +87,7 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            is_cn=is_cn,
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -126,8 +137,55 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    is_cn: bool = False,
 ) -> str:
-    """Assemble the sentiment-analyst system message with structured data blocks."""
+    """Assemble the sentiment-analyst system message with structured data blocks.
+
+    For Chinese A-share stocks (is_cn=True), the prompt omits the StockTwits
+    and Reddit sections entirely since these US-centric platforms don't cover
+    A-share tickers, and adjusts the analysis instructions accordingly.
+    """
+    # A-share: only news data is available; social platforms are irrelevant.
+    if is_cn:
+        return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} (Chinese A-share stock) covering the period from {start_date} to {end_date}, drawing on available data sources that have already been collected for you.
+
+## Data sources (pre-fetched, in this prompt)
+
+### News headlines — Yahoo Finance / available sources, past 7 days
+Institutional framing. Fact-driven, slower-moving signal.
+
+<start_of_news>
+{news_block}
+<end_of_news>
+
+Note: StockTwits and Reddit do not cover Chinese A-share stocks, so social media sentiment data is unavailable for this ticker. Base your analysis primarily on news framing and any macro context you can infer.
+
+## How to analyze this data (best practices for A-share stocks)
+
+1. **Focus on news framing and narrative direction.** With no social media data, the news block is your primary input. Assess the overall tone (positive/negative/neutral) and identify recurring themes.
+
+2. **Distinguish opinion from event.** A news headline about a policy change or earnings report is an event; editorial commentary is opinion. Weight events more heavily.
+
+3. **Identify recurring narrative themes.** What topic keeps coming up? That's the dominant narrative driving current sentiment.
+
+4. **Be honest about data limits.** Since social media data is unavailable, your confidence should reflect this limitation. Flag it explicitly in the `confidence` field and the narrative.
+
+5. **Identify catalysts and risks** that emerge from news — upcoming earnings, policy changes, competitive threats, macro headlines, etc.
+
+6. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+
+## Output fields
+
+Fill the following fields:
+
+- **overall_band**: Exactly one of Bullish / Mildly Bullish / Neutral / Mixed / Mildly Bearish / Bearish. Use Mixed when sources point in clearly different directions; Neutral only when all sources are genuinely silent.
+- **overall_score**: A number from 0 (maximally bearish) to 10 (maximally bullish); 5 is neutral. Keep it consistent with overall_band.
+- **confidence**: low / medium / high, based on data quality and sample size. Given the absence of social media data, confidence should generally be low or medium.
+- **narrative**: Full source-by-source breakdown, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
+
+{get_language_instruction()}"""
+
+    # Non-A-share: full three-source analysis
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)

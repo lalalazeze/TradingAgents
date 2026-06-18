@@ -122,13 +122,86 @@ def _assert_ohlcv_not_stale(
         )
 
 
+def _is_cn_symbol(symbol: str) -> bool:
+    """Detect whether a ticker symbol represents a Chinese A-share stock."""
+    s = str(symbol).upper().strip()
+    if s.endswith(".SH") or s.endswith(".SZ") or s.endswith(".BJ"):
+        return True
+    if (s.startswith("SH") or s.startswith("SZ") or s.startswith("BJ")) and len(s) > 6:
+        return True
+    if len(s) == 6 and s.isdigit() and (
+        s.startswith("6") or s.startswith("0") or s.startswith("3")
+        or s.startswith("8") or s.startswith("4")
+    ):
+        return True
+    return False
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
     Downloads 5 years of data up to today and caches per symbol. On
     subsequent calls the cache is reused. Rows after curr_date are
     filtered out so backtests never see future prices.
+
+    For Chinese A-share symbols, routes through ``route_to_vendor`` instead
+    of calling yfinance directly, so domestic data sources (tushare/akshare)
+    are used and yfinance rate-limits are avoided.
     """
+    # --- A-share fast path: use route_to_vendor for domestic data sources ---
+    if _is_cn_symbol(symbol):
+        from .interface import route_to_vendor
+        config = get_config()
+        curr_date_dt = pd.to_datetime(curr_date)
+        today_date = pd.Timestamp.today()
+        start_date = (today_date - pd.DateOffset(years=5)).strftime("%Y-%m-%d")
+        end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        os.makedirs(config["data_cache_dir"], exist_ok=True)
+        safe_sym = safe_ticker_component(symbol)
+        cn_cache = os.path.join(
+            config["data_cache_dir"],
+            f"{safe_sym}-CN-data-{start_date}-{end_str}.csv",
+        )
+
+        # Try cache first
+        data = None
+        if os.path.exists(cn_cache):
+            cached = pd.read_csv(cn_cache, on_bad_lines="skip", encoding="utf-8")
+            if not cached.empty and "Close" in cached.columns:
+                data = cached
+
+        if data is None:
+            csv_text = route_to_vendor(
+                "get_stock_data", symbol, start_date, end_str
+            )
+            if csv_text and "NO_DATA_AVAILABLE" not in csv_text:
+                # Parse CSV text into DataFrame (skip comment lines starting with #)
+                lines = [line for line in csv_text.strip().split("\n")
+                         if line and not line.startswith("#")]
+                if lines:
+                    data = pd.read_csv(
+                        pd.io.common.StringIO("\n".join(lines)),
+                        encoding="utf-8",
+                    )
+                    # Ensure Date column is datetime
+                    if "Date" in data.columns:
+                        data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
+                    if not data.empty and "Close" in data.columns:
+                        data.to_csv(cn_cache, index=False, encoding="utf-8")
+
+        if data is None or data.empty or "Close" not in data.columns:
+            raise NoMarketDataError(
+                symbol, symbol, "No A-share data available from domestic vendors"
+            )
+
+        data = _clean_dataframe(data)
+        # Filter to curr_date to prevent look-ahead bias
+        data = data[data["Date"] <= curr_date_dt]
+        _assert_ohlcv_not_stale(data, curr_date, symbol, symbol)
+        return data
+
+    # --- Default path: yfinance for non-A-share symbols ---
     # Resolve broker/forex symbols (XAUUSD+ -> GC=F) to Yahoo's convention,
     # then reject values that would escape the cache directory when
     # interpolated into the cache filename (e.g. ``../../tmp/x``).
