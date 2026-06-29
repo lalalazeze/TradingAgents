@@ -6,12 +6,20 @@ only tool available was Yahoo Finance news — which led LLMs to fabricate
 Reddit/X/StockTwits content under prompt pressure (verified live).
 
 The redesigned agent pre-fetches three complementary data sources before
-the LLM is invoked and injects them into the prompt as structured blocks:
+the LLM is invoked and injects them into the prompt as structured blocks.
 
+**US/Global tickers** use:
   1. News headlines     — Yahoo Finance (institutional framing)
   2. StockTwits messages — retail-trader posts indexed by cashtag, with
                            user-labeled Bullish/Bearish sentiment tags
   3. Reddit posts        — r/wallstreetbets, r/stocks, r/investing
+
+**Chinese A-share tickers** use three domestic data sources (via akshare):
+  1. 个股新闻 (fetch_cn_news) — per-ticker news from 东方财富
+  2. 热门关键词 (fetch_cn_hot_keywords) — hot concepts/themes, a lightweight
+     social signal showing what themes the market is discussing
+  3. 千股千评 (fetch_cn_comment) — composite score, attention, institutional
+     participation — quantified sentiment metrics
 
 The agent does not use tool-calling; the data is in the prompt from
 turn 0. Output uses the structured-output pattern (json_schema for
@@ -38,6 +46,11 @@ from tradingagents.agents.utils.agent_utils import (
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
+)
+from tradingagents.dataflows.cn_social import (
+    fetch_cn_comment,
+    fetch_cn_hot_keywords,
+    fetch_cn_news,
 )
 from tradingagents.dataflows.interface import is_cn_symbol
 from tradingagents.dataflows.reddit import fetch_reddit_posts
@@ -70,15 +83,23 @@ def create_sentiment_analyst(llm):
         #
         # For Chinese A-share symbols, StockTwits and Reddit are skipped
         # because these US-centric social platforms do not cover A-share
-        # tickers — their "data" would be empty placeholders or SSL errors.
+        # tickers. Instead, three domestic data sources are used:
+        #   1. 个股新闻 (fetch_cn_news) — per-ticker news from 东方财富
+        #   2. 热门关键词 (fetch_cn_hot_keywords) — hot concepts/themes
+        #   3. 千股千评 (fetch_cn_comment) — composite score + attention
         is_cn = is_cn_symbol(ticker)
-        news_block = get_news.func(ticker, start_date, end_date)
         if is_cn:
-            stocktwits_block = "<unavailable> StockTwits does not cover Chinese A-share stocks."
-            reddit_block = "<unavailable> Reddit (r/wallstreetbets, r/stocks, r/investing) does not cover Chinese A-share stocks."
+            news_block = fetch_cn_news(ticker)
+            hot_keyword_block = fetch_cn_hot_keywords(ticker)
+            comment_block = fetch_cn_comment(ticker)
+            stocktwits_block = None
+            reddit_block = None
         else:
+            news_block = get_news.func(ticker, start_date, end_date)
             stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
             reddit_block = fetch_reddit_posts(ticker)
+            hot_keyword_block = None
+            comment_block = None
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -87,6 +108,8 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            hot_keyword_block=hot_keyword_block,
+            comment_block=comment_block,
             is_cn=is_cn,
         )
 
@@ -135,44 +158,64 @@ def _build_system_message(
     start_date: str,
     end_date: str,
     news_block: str,
-    stocktwits_block: str,
-    reddit_block: str,
+    stocktwits_block: str | None = None,
+    reddit_block: str | None = None,
+    hot_keyword_block: str | None = None,
+    comment_block: str | None = None,
     is_cn: bool = False,
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks.
 
-    For Chinese A-share stocks (is_cn=True), the prompt omits the StockTwits
-    and Reddit sections entirely since these US-centric platforms don't cover
-    A-share tickers, and adjusts the analysis instructions accordingly.
+    For Chinese A-share stocks (is_cn=True), the prompt describes three
+    domestic data blocks: 个股新闻, 热门关键词, and 千股千评.
+    For non-A-share stocks, the prompt describes the three US/Global blocks:
+    news headlines, StockTwits messages, and Reddit posts.
     """
-    # A-share: only news data is available; social platforms are irrelevant.
+    # A-share: three domestic data sources
     if is_cn:
-        return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} (Chinese A-share stock) covering the period from {start_date} to {end_date}, drawing on available data sources that have already been collected for you.
+        return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} (Chinese A-share stock) covering the period from {start_date} to {end_date}, drawing on three domestic data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
 
-### News headlines — Yahoo Finance / available sources, past 7 days
-Institutional framing. Fact-driven, slower-moving signal.
+### 个股新闻 — 东方财富个股新闻快讯 (past 7 days)
+Per-ticker news from 东方财富, analogous to institutional news framing. Fact-driven, event-oriented signal covering company announcements, analyst commentary, sector news, and market-moving events.
 
 <start_of_news>
 {news_block}
 <end_of_news>
 
-Note: StockTwits and Reddit do not cover Chinese A-share stocks, so social media sentiment data is unavailable for this ticker. Base your analysis primarily on news framing and any macro context you can infer.
+### 热门关键词/概念 — 市场热门主题
+Top hot concepts and keywords the market is discussing around this ticker, from 东方财富. This is a lightweight social signal — what themes, sectors, or narratives are drawing attention. Higher heat values mean more market buzz.
+
+<start_of_hot_keywords>
+{hot_keyword_block}
+<end_of_hot_keywords>
+
+### 千股千评 — 综合评分与市场指标
+Quantitative sentiment metrics from 东方财富's per-stock evaluation system, computed from guba (股吧) browsing activity, watchlist additions, capital flow, and institutional participation. Key fields:
+- 综合评分: Composite score (higher = more positive sentiment)
+- 关注度/市场关注度: Market attention level
+- 机构参与度: Institutional participation ratio
+
+<start_of_comment>
+{comment_block}
+<end_of_comment>
 
 ## How to analyze this data (best practices for A-share stocks)
 
-1. **Focus on news framing and narrative direction.** With no social media data, the news block is your primary input. Assess the overall tone (positive/negative/neutral) and identify recurring themes.
+1. **Cross-reference news events with hot concepts.** If news mentions a policy change and the hot keywords show a related concept trending, that's a reinforcing signal. If news is silent but a concept is hot, the market may be anticipating something.
 
-2. **Distinguish opinion from event.** A news headline about a policy change or earnings report is an event; editorial commentary is opinion. Weight events more heavily.
+2. **Use 千股千评 as a quantitative anchor.** The composite score and attention metrics provide a numerical baseline. Cross-check your qualitative reading of the news against these numbers — agreement increases confidence; divergence warrants investigation.
 
-3. **Identify recurring narrative themes.** What topic keeps coming up? That's the dominant narrative driving current sentiment.
+3. **Read hot keywords for narrative direction.** The top-ranked concepts reveal what themes the market is focused on for this stock. Are they bullish themes (new contracts, policy support) or bearish ones (regulatory risk, earnings miss)? The heat values indicate conviction.
 
-4. **Be honest about data limits.** Since social media data is unavailable, your confidence should reflect this limitation. Flag it explicitly in the `confidence` field and the narrative.
+4. **Distinguish opinion from event in news.** A headline about a policy change or earnings report is an event; editorial commentary is opinion. Weight events more heavily.
 
-5. **Identify catalysts and risks** that emerge from news — upcoming earnings, policy changes, competitive threats, macro headlines, etc.
+5. **Identify catalysts and risks** that emerge across the three sources — upcoming earnings, policy changes, competitive threats, institutional flow shifts, etc.
 
-6. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+6. **Be honest about data limits.** If one or more sources returned a placeholder (e.g. "<cn_news unavailable>"), your analysis is less robust — flag this explicitly in the `confidence` field and the narrative.
+
+7. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
 
 ## Output fields
 
@@ -180,8 +223,8 @@ Fill the following fields:
 
 - **overall_band**: Exactly one of Bullish / Mildly Bullish / Neutral / Mixed / Mildly Bearish / Bearish. Use Mixed when sources point in clearly different directions; Neutral only when all sources are genuinely silent.
 - **overall_score**: A number from 0 (maximally bearish) to 10 (maximally bullish); 5 is neutral. Keep it consistent with overall_band.
-- **confidence**: low / medium / high, based on data quality and sample size. Given the absence of social media data, confidence should generally be low or medium.
-- **narrative**: Full source-by-source breakdown, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
+- **confidence**: low / medium / high, based on data quality and sample size. When all three sources return substantive data, confidence can be medium or high. If any source is a placeholder, cap at low or medium.
+- **narrative**: Full source-by-source breakdown, cross-source divergences and alignments, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
 
 {get_language_instruction()}"""
 
