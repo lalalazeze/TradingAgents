@@ -168,8 +168,9 @@ def get_category_for_method(method: str) -> str:
 def is_cn_symbol(symbol: str) -> bool:
     """Detect whether a ticker symbol represents a Chinese A-share stock."""
     s = str(symbol).upper().strip()
-    # A-share patterns: 6-digit pure numbers, or with .SH/.SZ/.BJ suffixes
-    if s.endswith(".SH") or s.endswith(".SZ") or s.endswith(".BJ"):
+    # A-share patterns: 6-digit pure numbers, or with .SH/.SS/.SZ/.BJ suffixes
+    # (.SS is yfinance's Shanghai suffix, equivalent to .SH)
+    if s.endswith(".SH") or s.endswith(".SS") or s.endswith(".SZ") or s.endswith(".BJ"):
         return True
     if s.startswith("SH") or s.startswith("SZ") or s.startswith("BJ") and len(s) > 6:
         return True
