@@ -25,23 +25,31 @@ DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
 )
 
 
-def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
-    """OHLCV on or before curr_date, date-sorted. Raises if nothing usable.
+def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame | None:
+    """OHLCV on or before curr_date, date-sorted. Returns None if nothing usable.
 
     ``load_ohlcv`` already normalizes the Date column and filters out
     look-ahead rows, but we re-apply the cutoff defensively — this is a
     verification path, so it must not trust its input to be pre-filtered.
     """
-    data = load_ohlcv(symbol, curr_date)
+    try:
+        data = load_ohlcv(symbol, curr_date)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to load OHLCV for %s: %s", symbol, exc
+        )
+        return None
+
     if data is None or data.empty:
-        raise ValueError(f"No OHLCV data available for {symbol}.")
+        return None
 
     df = data.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
     df = df[df["Date"] <= pd.to_datetime(curr_date)].sort_values("Date")
     if df.empty:
-        raise ValueError(f"No OHLCV rows on or before {curr_date} for {symbol}.")
+        return None
     return df
 
 
@@ -70,6 +78,15 @@ def build_verified_market_snapshot(
     # Volume); stockstats `wrap()` lowercases columns and adds indicator
     # columns, so read raw prices from `df` and indicators from `stock_df`.
     df = _verified_rows(symbol, curr_date)
+    if df is None or df.empty:
+        return (
+            f"## Verified market data snapshot for {symbol.upper()}\n"
+            f"\n"
+            f"- Requested analysis date: {curr_date}\n"
+            f"- **No OHLCV data available** for {symbol}. "
+            f"The symbol may be invalid, delisted, or data sources are temporarily unavailable.\n"
+            f"- Do NOT estimate or fabricate OHLCV values — report that market data is unavailable for this symbol.\n"
+        )
     stock_df = wrap(df.copy())
 
     selected = tuple(indicators or DEFAULT_SNAPSHOT_INDICATORS)

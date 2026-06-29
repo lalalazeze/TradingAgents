@@ -67,13 +67,23 @@ def _normalize_cn_symbol(symbol: str) -> str:
     for suffix in (".SZ", ".SH", ".BJ", ".SS"):
         if s.endswith(suffix):
             bare = s[:-len(suffix)]
-            market = suffix[1:]
-            if suffix == ".SS":
-                market = "SH"
-            if suffix == ".BJ":
-                market = "SZ"  # fallback
+            # Infer correct market from code prefix, not just suffix.
+            # .SS (yfinance Shanghai) with a 0/3-prefix code → actually SZ.
             if len(bare) == 6 and bare.isdigit():
-                return f"{market.lower()}.{bare}"
+                if bare.startswith("6"):
+                    market = "sh"
+                elif bare.startswith("0") or bare.startswith("3"):
+                    market = "sz"
+                elif bare.startswith("8") or bare.startswith("4"):
+                    market = "sz"
+                else:
+                    # Fallback: use suffix mapping
+                    market = suffix[1:].lower()
+                    if suffix == ".SS":
+                        market = "sh"
+                    elif suffix == ".BJ":
+                        market = "sz"
+                return f"{market}.{bare}"
 
     # Strip prefix SZ/SH/BJ
     for prefix, market in (("SZ", "sz"), ("SH", "sh"), ("BJ", "sz")):

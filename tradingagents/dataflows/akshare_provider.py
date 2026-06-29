@@ -6,6 +6,7 @@ format as the yfinance/alpha_vantage counterparts so the routing layer
 can transparently swap vendors for Chinese tickers.
 """
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Annotated
@@ -19,6 +20,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_PROXY_KEYS = (
+    "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+    "all_proxy", "ALL_PROXY",
+)
+
+
+def _without_proxy():
+    """Temporarily remove proxy env vars so Chinese domestic APIs (eastmoney
+    etc.) are accessed directly, not through a VPN/proxy that may fail or
+    rate-limit.  Returns a dict of the original values for restoration."""
+    saved = {}
+    for key in _PROXY_KEYS:
+        val = os.environ.get(key)
+        if val is not None:
+            saved[key] = val
+            del os.environ[key]
+    return saved
+
+
+def _restore_proxy(saved):
+    """Restore proxy env vars previously removed by _without_proxy."""
+    for key, val in saved.items():
+        os.environ[key] = val
+    for key in _PROXY_KEYS:
+        if key not in saved and key in os.environ:
+            del os.environ[key]
 
 _AKSHARE_AVAILABLE = False
 _ak = None
@@ -97,24 +125,28 @@ def get_stock_data_akshare(
     # Retry logic — AKShare can be flaky
     max_retries = 3
     base_delay = 1.0
-    for attempt in range(max_retries + 1):
-        try:
-            data = _ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
-                adjust="hfq",  # 后复权, consistent with yfinance adjusted close
-            )
-            break
-        except Exception as e:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                logger.warning("AKShare retry %d/%d for %s: %s (waiting %.1fs)",
-                               attempt + 1, max_retries, code, e, delay)
-                time.sleep(delay)
-            else:
-                raise VendorRateLimitError(f"AKShare failed after {max_retries} retries: {e}")
+    saved_proxy = _without_proxy()
+    try:
+        for attempt in range(max_retries + 1):
+            try:
+                data = _ak.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                    adjust="hfq",  # 后复权, consistent with yfinance adjusted close
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning("AKShare retry %d/%d for %s: %s (waiting %.1fs)",
+                                   attempt + 1, max_retries, code, e, delay)
+                    time.sleep(delay)
+                else:
+                    raise VendorRateLimitError(f"AKShare failed after {max_retries} retries: {e}")
+    finally:
+        _restore_proxy(saved_proxy)
 
     if data is None or data.empty:
         raise NoMarketDataError(symbol, code, f"no rows between {start_date} and {end_date}")
@@ -181,6 +213,7 @@ def get_indicators_akshare(
     before_dt = curr_dt - pd.Timedelta(days=look_back_days)
 
     # Fetch daily data first, then compute indicator
+    saved_proxy = _without_proxy()
     try:
         data = _ak.stock_zh_a_hist(
             symbol=code,
@@ -191,6 +224,8 @@ def get_indicators_akshare(
         )
     except Exception as e:
         raise VendorRateLimitError(f"AKShare indicator fetch failed: {e}")
+    finally:
+        _restore_proxy(saved_proxy)
 
     if data is None or data.empty:
         raise NoMarketDataError(symbol, code, "no data for indicator calculation")

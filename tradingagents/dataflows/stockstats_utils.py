@@ -125,7 +125,8 @@ def _assert_ohlcv_not_stale(
 def _is_cn_symbol(symbol: str) -> bool:
     """Detect whether a ticker symbol represents a Chinese A-share stock."""
     s = str(symbol).upper().strip()
-    if s.endswith(".SH") or s.endswith(".SZ") or s.endswith(".BJ"):
+    # .SS is yfinance's Shanghai suffix (equivalent to .SH)
+    if s.endswith(".SH") or s.endswith(".SS") or s.endswith(".SZ") or s.endswith(".BJ"):
         return True
     if (s.startswith("SH") or s.startswith("SZ") or s.startswith("BJ")) and len(s) > 6:
         return True
@@ -290,7 +291,18 @@ class StockstatsUtils:
             str, "curr date for retrieving stock price data, YYYY-mm-dd"
         ],
     ):
-        data = load_ohlcv(symbol, curr_date)
+        try:
+            data = load_ohlcv(symbol, curr_date)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Failed to load OHLCV for %s: %s", symbol, exc
+            )
+            return f"N/A: Failed to load market data for {symbol} ({type(exc).__name__})"
+
+        if data is None or data.empty:
+            return f"N/A: No market data available for {symbol}"
+
         df = wrap(data)
         df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
         curr_date_str = pd.to_datetime(curr_date).strftime("%Y-%m-%d")
