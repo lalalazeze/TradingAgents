@@ -18,8 +18,18 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
+    # Provider-specific reasoning/thinking knobs (None = each provider's own
+    # default). Settable here for non-interactive runs; the CLI also offers an
+    # interactive choice, which is skipped when the matching var is set.
+    "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
+    "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
+    "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
     "TRADINGAGENTS_CHINA_DATA_VENDOR":    "china_data_vendor_default",
 }
+
+
+_BOOL_TRUE = ("true", "1", "yes", "on")
+_BOOL_FALSE = ("false", "0", "no", "off")
 
 # A-share data vendor — when a stock code is detected as A-share (e.g.
 # 000001, 600036.SH, 688987.BJ), the China data vendors
@@ -29,9 +39,21 @@ _ENV_OVERRIDES = {
 # Set via TRADINGAGENTS_CHINA_DATA_VENDOR env var or directly in config dict.
 
 def _coerce(value: str, reference):
-    """Coerce env-var string to the type of the existing default value."""
+    """Coerce env-var string to the type of the existing default value.
+
+    Invalid values raise ``ValueError`` rather than silently falling back to a
+    default — a misspelled boolean (e.g. ``treu``) or non-numeric int should fail
+    loudly at startup, not quietly misconfigure an unattended run.
+    """
     if isinstance(reference, bool):
-        return value.strip().lower() in ("true", "1", "yes", "on")
+        normalized = value.strip().lower() in ("true", "1", "yes", "on")
+        if normalized in _BOOL_TRUE:
+            return True
+        if normalized in _BOOL_FALSE:
+            return False
+        raise ValueError(
+            f"expected a boolean ({'/'.join(_BOOL_TRUE + _BOOL_FALSE)}), got {value!r}"
+        )
     if isinstance(reference, int) and not isinstance(reference, bool):
         return int(value)
     if isinstance(reference, float):
@@ -45,7 +67,10 @@ def _apply_env_overrides(config: dict) -> dict:
         raw = os.environ.get(env_var)
         if raw is None or raw == "":
             continue
-        config[key] = _coerce(raw, config.get(key))
+        try:
+            config[key] = _coerce(raw, config.get(key))
+        except ValueError as exc:
+            raise ValueError(f"Invalid value for {env_var}: {exc}") from exc
     return config
 
 
