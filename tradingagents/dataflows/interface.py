@@ -260,8 +260,10 @@ def route_to_vendor(method: str, *args, **kwargs):
                 method, symbol or "", vendor, vendor_chain,
             )
             return impl_func(*args, **kwargs)
-        except VendorRateLimitError:
+        except VendorRateLimitError as e:
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
+            if first_error is None:
+                first_error = e
             continue
         except VendorNotConfiguredError as e:
             logger.warning("Vendor %r not configured for %s: %s; trying next vendor.", vendor, method, e)

@@ -5,6 +5,7 @@ import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
+from .errors import VendorRateLimitError
 from .stockstats_utils import (
     StockstatsUtils,
     _assert_ohlcv_not_stale,
@@ -332,7 +333,7 @@ def get_fundamentals(
 
         return header + "\n".join(lines)
 
-    except NoMarketDataError:
+    except (NoMarketDataError, VendorRateLimitError):
         raise
     except Exception as e:
         return f"Error retrieving fundamentals for {ticker}: {str(e)}"
@@ -367,7 +368,7 @@ def get_balance_sheet(
 
         return header + csv_string
 
-    except NoMarketDataError:
+    except (NoMarketDataError, VendorRateLimitError):
         raise
     except Exception as e:
         return f"Error retrieving balance sheet for {ticker}: {str(e)}"
@@ -402,7 +403,7 @@ def get_cashflow(
 
         return header + csv_string
 
-    except NoMarketDataError:
+    except (NoMarketDataError, VendorRateLimitError):
         raise
     except Exception as e:
         return f"Error retrieving cash flow for {ticker}: {str(e)}"
@@ -437,7 +438,7 @@ def get_income_statement(
 
         return header + csv_string
 
-    except NoMarketDataError:
+    except (NoMarketDataError, VendorRateLimitError):
         raise
     except Exception as e:
         return f"Error retrieving income statement for {ticker}: {str(e)}"
@@ -466,5 +467,7 @@ def get_insider_transactions(
 
         return header + csv_string
 
+    except (NoMarketDataError, VendorRateLimitError):
+        raise
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"

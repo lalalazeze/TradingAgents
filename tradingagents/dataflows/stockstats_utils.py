@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import time
 from typing import Annotated
 
@@ -9,6 +10,7 @@ from stockstats import wrap
 from yfinance.exceptions import YFRateLimitError
 
 from .config import get_config
+from .errors import VendorRateLimitError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import safe_ticker_component
 
@@ -20,23 +22,38 @@ logger = logging.getLogger(__name__)
 MAX_OHLCV_STALE_DAYS = 10
 
 
-def yf_retry(func, max_retries=3, base_delay=2.0):
-    """Execute a yfinance call with exponential backoff on rate limits.
+def yf_retry(func, max_retries=5, base_delay=5.0, max_delay=120.0):
+    """Execute a yfinance call with exponential backoff + jitter on rate limits.
 
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
     retry them internally. This wrapper adds retry logic specifically
     for rate limits. Other exceptions propagate immediately.
+
+    Yahoo's 429 cooldowns often last a minute or more, so the backoff is
+    aggressive: 5 retries with exponential delays (5s, 10s, 20s, 40s, 80s)
+    plus ±25% jitter to avoid thundering-herd retries, capped at ``max_delay``.
+    On final failure the error is re-raised as :class:`VendorRateLimitError`
+    so the routing layer (``route_to_vendor``) can skip to the next vendor
+    instead of aborting the whole call.
     """
     for attempt in range(max_retries + 1):
         try:
             return func()
         except YFRateLimitError:
             if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
-                time.sleep(delay)
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                # Add ±25% jitter so concurrent callers don't retry in lockstep
+                jitter = delay * random.uniform(-0.25, 0.25)
+                sleep_for = max(1.0, delay + jitter)
+                logger.warning(
+                    f"Yahoo Finance rate limited, retrying in {sleep_for:.0f}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(sleep_for)
             else:
-                raise
+                raise VendorRateLimitError(
+                    f"Yahoo Finance rate-limited after {max_retries} retries"
+                ) from None
 
 
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
