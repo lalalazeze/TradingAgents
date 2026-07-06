@@ -1,6 +1,7 @@
 """yfinance-based news data fetching functions."""
 
 import contextlib
+import time
 from datetime import datetime
 
 import yfinance as yf
@@ -10,6 +11,38 @@ from .config import get_config
 from .errors import VendorRateLimitError
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
+
+# ---------------------------------------------------------------------------
+# Process-level cache for yfinance news API calls.
+#
+# Yahoo's rate limiter (HTTP 429) is aggressive and the cooldown can last
+# minutes. Within a single analysis run the same ticker's news is often
+# requested multiple times (market analyst, news analyst, risk debate…).
+# Caching the raw API response for a few minutes eliminates redundant calls
+# and dramatically reduces the chance of hitting the rate limit.
+# ---------------------------------------------------------------------------
+_news_cache: dict[str, tuple[float, object]] = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _cached(key: str, loader):
+    """Return cached value if fresh, otherwise call *loader* and cache it."""
+    now = time.monotonic()
+    hit = _news_cache.get(key)
+    if hit and (now - hit[0]) < _CACHE_TTL:
+        return hit[1]
+    value = loader()
+    _news_cache[key] = (now, value)
+    return value
+
+
+def _rate_limited_msg(scope: str) -> str:
+    """Standard degradation message when Yahoo rate-limits news requests."""
+    return (
+        f"DATA_UNAVAILABLE: Yahoo Finance is rate-limiting {scope} requests. "
+        f"News data could not be retrieved. Proceed with available data; "
+        f"do not fabricate news content."
+    )
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -96,7 +129,10 @@ def get_news_yfinance(
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     try:
         stock = yf.Ticker(canonical)
-        news = yf_retry(lambda: stock.get_news(count=article_limit))
+        news = _cached(
+            f"news:{canonical}:{article_limit}",
+            lambda: yf_retry(lambda: stock.get_news(count=article_limit)),
+        )
 
         if not news:
             return f"No news found for {ticker}{resolved}"
@@ -129,7 +165,7 @@ def get_news_yfinance(
         return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
     except VendorRateLimitError:
-        raise
+        return _rate_limited_msg(f"news for {ticker}")
     except Exception as e:
         return f"Error fetching news for {ticker}: {str(e)}"
 
@@ -164,11 +200,14 @@ def get_global_news_yfinance(
 
     try:
         for query in search_queries:
-            search = yf_retry(lambda q=query: yf.Search(
-                query=q,
-                news_count=limit,
-                enable_fuzzy_query=True,
-            ))
+            search = _cached(
+                f"search:{query}:{limit}",
+                lambda q=query: yf_retry(lambda: yf.Search(
+                    query=q,
+                    news_count=limit,
+                    enable_fuzzy_query=True,
+                )),
+            )
 
             if search.news:
                 for article in search.news:
@@ -219,6 +258,6 @@ def get_global_news_yfinance(
         return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
 
     except VendorRateLimitError:
-        raise
+        return _rate_limited_msg("global news")
     except Exception as e:
         return f"Error fetching global news: {str(e)}"
